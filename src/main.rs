@@ -12,10 +12,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use roblox_asset_downloader::roblox;
 use roblox_asset_downloader::roblox::{cache, Client, Endpoints};
+use roblox_asset_downloader::roblox::cookie::{load_cookies, CookieRotator};
 use roblox_asset_downloader::roblox::proxy::load_proxies;
 
 const CACHE_DIR: &str = "cache";
-const MAX_CACHE_BYTES: u64 = 15 * 1024 * 1024 * 1024; // 15 GB
+const MAX_CACHE_BYTES: u64 = 15 * 1024 * 1024 * 1024;
 const CACHE_CLEANUP_INTERVAL_SECS: u64 = 60;
 
 struct AppState {
@@ -27,16 +28,27 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    let roblox_authorization =
-        std::env::var("ROBLOX_AUTHORIZATION").expect("Expected ROBLOX_AUTHORIZATION in env");
+    let api_token =
+        std::env::var("API_TOKEN").expect("Expected API_TOKEN in env");
 
-    let api_token = std::env::var("API_TOKEN").expect("Expected API_TOKEN in env");
+    let cookies = load_cookies("cookies.txt").await;
+    let cookie_rotator = if cookies.is_empty() {
+        eprintln!(
+            "No cookies in cookies.txt, falling back to ROBLOX_AUTHORIZATION env var"
+        );
+        let auth = std::env::var("ROBLOX_AUTHORIZATION").expect(
+            "Expected ROBLOX_AUTHORIZATION in env or cookies in cookies.txt",
+        );
+        CookieRotator::new(vec![auth])
+    } else {
+        CookieRotator::new(cookies)
+    };
 
     let proxies = load_proxies("proxies.txt").await;
     println!("Loaded {} proxies", proxies.len());
 
     let client = Client::new(
-        roblox_authorization,
+        cookie_rotator,
         Endpoints::new(
             "auth.roblox.com".into(),
             "economy.roblox.com".into(),
@@ -47,8 +59,13 @@ async fn main() {
         proxies,
     );
 
-    let csrf = client.get_csrf().await.expect("Failed to get CSRF");
-    println!("Initial CSRF: {csrf}");
+    match client.get_csrf_initial().await {
+        Ok(csrf) => println!("Initial CSRF: {csrf}"),
+        Err(e) => {
+            eprintln!("WARNING: Failed to get initial CSRF: {e}");
+            eprintln!("Some cookies may be invalid. Continuing anyway...");
+        }
+    }
 
     let cache_dir = PathBuf::from(CACHE_DIR);
     tokio::fs::create_dir_all(&cache_dir).await.unwrap();
@@ -68,10 +85,14 @@ async fn main() {
 
     let app = Router::new()
         .route("/asset/{id}", get(download_asset_handler))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let listener =
+        tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     println!(
         "Web server listening on http://{}",
         listener.local_addr().unwrap()
@@ -92,14 +113,11 @@ async fn auth_middleware(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string());
 
-    let token_from_query = req
-        .uri()
-        .query()
-        .and_then(|query| {
-            url::form_urlencoded::parse(query.as_bytes())
-                .find(|(key, _)| key == "token")
-                .map(|(_, value)| value.to_string())
-        });
+    let token_from_query = req.uri().query().and_then(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "token")
+            .map(|(_, value)| value.to_string())
+    });
 
     let provided_token = token_from_header.or(token_from_query);
 
@@ -107,22 +125,18 @@ async fn auth_middleware(
         Some(token) if token == state.api_token => {
             next.run(req).await
         }
-        Some(_) => {
-            (
-                StatusCode::FORBIDDEN,
-                [(header::CONTENT_TYPE, "application/json")],
-                r#"{"error":"Invalid API token"}"#,
-            )
-                .into_response()
-        }
-        None => {
-            (
-                StatusCode::UNAUTHORIZED,
-                [(header::CONTENT_TYPE, "application/json")],
-                r#"{"error":"Missing API token. Use 'Authorization: Bearer <token>' header or '?token=<token>' query parameter"}"#,
-            )
-                .into_response()
-        }
+        Some(_) => (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"error":"Invalid API token"}"#,
+        )
+            .into_response(),
+        None => (
+            StatusCode::UNAUTHORIZED,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"error":"Missing API token. Use 'Authorization: Bearer <token>' header or '?token=<token>' query parameter"}"#,
+        )
+            .into_response(),
     }
 }
 
@@ -144,8 +158,12 @@ async fn download_asset_handler(
             let cache_path_owned = cache_path.clone();
             let bytes_clone = bytes.clone();
             tokio::spawn(async move {
-                if let Err(e) = tokio::fs::write(&cache_path_owned, &bytes_clone).await {
-                    eprintln!("Failed to write cache for {asset_id}: {e}");
+                if let Err(e) =
+                    tokio::fs::write(&cache_path_owned, &bytes_clone).await
+                {
+                    eprintln!(
+                        "Failed to write cache for {asset_id}: {e}"
+                    );
                 }
             });
 
@@ -185,10 +203,12 @@ async fn fetch_and_download_asset(
 
     println!("Total unique places to check: {}", places.len());
 
-    let download_url = find_asset_location_parallel(state, asset_id, &places).await;
+    let download_url =
+        find_asset_location_parallel(state, asset_id, &places).await;
 
-    let url = download_url
-        .ok_or("Could not find a valid place to download this asset")?;
+    let url = download_url.ok_or(
+        "Could not find a valid place to download this asset",
+    )?;
 
     download_bytes(&state.client, &url).await
 }
@@ -206,10 +226,17 @@ async fn collect_places(
         match client.get_all_group_games(group_id, 100).await {
             Ok(games) => games
                 .into_iter()
-                .map(|g| (g.root_place.id, format!("group:{group_id}:{}", g.name)))
+                .map(|g| {
+                    (
+                        g.root_place.id,
+                        format!("group:{group_id}:{}", g.name),
+                    )
+                })
                 .collect(),
             Err(e) => {
-                eprintln!("Failed to fetch group games for {group_id}: {e}");
+                eprintln!(
+                    "Failed to fetch group games for {group_id}: {e}"
+                );
                 Vec::new()
             }
         }
@@ -220,8 +247,12 @@ async fn collect_places(
         let client_for_groups = client.clone();
 
         let (user_games_result, groups_result) = tokio::join!(
-            async move { client_for_games.get_all_user_games(user_id, 50).await },
-            async move { client_for_groups.get_user_groups(user_id).await },
+            async move {
+                client_for_games.get_all_user_games(user_id, 50).await
+            },
+            async move {
+                client_for_groups.get_user_groups(user_id).await
+            },
         );
 
         let mut places = Vec::new();
@@ -229,14 +260,21 @@ async fn collect_places(
         match user_games_result {
             Ok(games) => {
                 for g in games {
-                    places.push((g.root_place.id, format!("user:{user_id}:{}", g.name)));
+                    places.push((
+                        g.root_place.id,
+                        format!("user:{user_id}:{}", g.name),
+                    ));
                 }
             }
-            Err(e) => eprintln!("Failed to fetch user games for {user_id}: {e}"),
+            Err(e) => eprintln!(
+                "Failed to fetch user games for {user_id}: {e}"
+            ),
         }
 
         let groups = groups_result.unwrap_or_else(|e| {
-            eprintln!("Failed to fetch groups for user {user_id}: {e}");
+            eprintln!(
+                "Failed to fetch groups for user {user_id}: {e}"
+            );
             Vec::new()
         });
 
@@ -249,18 +287,26 @@ async fn collect_places(
                 let group_name = group.name.clone();
 
                 join_set.spawn(async move {
-                    match client.get_all_group_games(group_id, 100).await {
+                    match client
+                        .get_all_group_games(group_id, 100)
+                        .await
+                    {
                         Ok(games) => games
                             .into_iter()
                             .map(|g| {
                                 (
                                     g.root_place.id,
-                                    format!("group:{group_id}:{group_name}:{}", g.name),
+                                    format!(
+                                        "group:{group_id}:{group_name}:{}",
+                                        g.name
+                                    ),
                                 )
                             })
                             .collect::<Vec<_>>(),
                         Err(e) => {
-                            eprintln!("Failed to fetch group games for {group_id}: {e}");
+                            eprintln!(
+                                "Failed to fetch group games for {group_id}: {e}"
+                            );
                             Vec::new()
                         }
                     }
@@ -269,7 +315,9 @@ async fn collect_places(
 
             while let Some(result) = join_set.join_next().await {
                 match result {
-                    Ok(group_places) => places.extend(group_places),
+                    Ok(group_places) => {
+                        places.extend(group_places)
+                    }
                     Err(e) => eprintln!("Join error: {e}"),
                 }
             }
@@ -292,7 +340,8 @@ async fn find_asset_location_parallel(
     }
 
     let (found_tx, found_rx) = watch::channel(false);
-    let result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let result: Arc<Mutex<Option<String>>> =
+        Arc::new(Mutex::new(None));
 
     let mut join_set = JoinSet::new();
 
@@ -312,16 +361,23 @@ async fn find_asset_location_parallel(
                 return;
             }
 
-            match client.get_asset_location(asset_id, place_id).await {
+            match client
+                .get_asset_location(asset_id, place_id)
+                .await
+            {
                 Ok(location) => {
-                    println!("✓ Found via place {place_id} from {source}");
+                    println!(
+                        "✓ Found via place {place_id} from {source}"
+                    );
                     let mut res = result.lock().await;
                     if res.is_none() {
                         *res = Some(location);
                     }
                 }
                 Err(e) => {
-                    eprintln!("✗ Denied via place {place_id} from {source}: {e}");
+                    eprintln!(
+                        "✗ Denied via place {place_id} from {source}: {e}"
+                    );
                 }
             }
         });
@@ -347,7 +403,10 @@ async fn find_asset_location_parallel(
     }
 }
 
-async fn download_bytes(client: &Client, url: &str) -> Result<Vec<u8>, String> {
+async fn download_bytes(
+    client: &Client,
+    url: &str,
+) -> Result<Vec<u8>, String> {
     let mut last_err = None;
     let max_attempts = 3u64.max(client.proxy_count() as u64);
 
@@ -365,9 +424,15 @@ async fn download_bytes(client: &Client, url: &str) -> Result<Vec<u8>, String> {
                         "Download attempt {attempt}/{max_attempts} got 429: {body_text} (switching proxy)"
                     );
                     client.advance_proxy();
-                    last_err = Some(format!("HTTP 429: {body_text}"));
+                    last_err =
+                        Some(format!("HTTP 429: {body_text}"));
                     if attempt < max_attempts {
-                        tokio::time::sleep(std::time::Duration::from_millis(1000 * attempt)).await;
+                        tokio::time::sleep(
+                            std::time::Duration::from_millis(
+                                1000 * attempt,
+                            ),
+                        )
+                            .await;
                     }
                     continue;
                 }
@@ -378,9 +443,16 @@ async fn download_bytes(client: &Client, url: &str) -> Result<Vec<u8>, String> {
                     eprintln!(
                         "Download attempt {attempt}/{max_attempts} failed: HTTP {status}: {body_text}"
                     );
-                    last_err = Some(format!("HTTP {status}: {body_text}"));
+                    last_err = Some(format!(
+                        "HTTP {status}: {body_text}"
+                    ));
                     if attempt < max_attempts {
-                        tokio::time::sleep(std::time::Duration::from_millis(400 * attempt)).await;
+                        tokio::time::sleep(
+                            std::time::Duration::from_millis(
+                                400 * attempt,
+                            ),
+                        )
+                            .await;
                     }
                     continue;
                 }
@@ -388,20 +460,28 @@ async fn download_bytes(client: &Client, url: &str) -> Result<Vec<u8>, String> {
                 match resp.bytes().await {
                     Ok(bytes) => return Ok(bytes.to_vec()),
                     Err(e) => {
-                        eprintln!("Download bytes attempt {attempt}/{max_attempts} failed: {e}");
+                        eprintln!(
+                            "Download bytes attempt {attempt}/{max_attempts} failed: {e}"
+                        );
                         last_err = Some(e.to_string());
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Download request attempt {attempt}/{max_attempts} failed: {e}");
+                eprintln!(
+                    "Download request attempt {attempt}/{max_attempts} failed: {e}"
+                );
                 last_err = Some(e.to_string());
             }
         }
         if attempt < max_attempts {
-            tokio::time::sleep(std::time::Duration::from_millis(400 * attempt)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(
+                400 * attempt,
+            ))
+                .await;
         }
     }
 
-    Err(last_err.unwrap_or_else(|| "Unknown download error".into()))
+    Err(last_err
+        .unwrap_or_else(|| "Unknown download error".into()))
 }
