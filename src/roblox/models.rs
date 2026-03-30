@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub struct Creator{
+pub struct Creator {
     pub id: u64,
     pub name: String,
     pub creator_type: String,
@@ -12,7 +12,7 @@ pub struct Creator{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub struct AssetDetailsResponse{
+pub struct AssetDetailsResponse {
     pub target_id: u64,
     pub asset_id: u64,
     pub name: String,
@@ -23,7 +23,6 @@ pub struct AssetDetailsResponse{
     pub created: String,
     pub updated: String,
 }
-
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -45,8 +44,6 @@ pub struct GameDetail {
     pub name: String,
     pub root_place: RootPlace,
 }
-
-
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
