@@ -10,9 +10,9 @@ use crate::roblox::models::{
     GroupGamesResponse, GroupInfo, UserGroupListResponse,
 };
 
+pub mod cache;
 pub mod models;
 pub mod proxy;
-pub mod cache;
 
 #[derive(Debug, Clone)]
 pub struct Endpoints {
@@ -59,7 +59,7 @@ struct CsrfState {
 
 #[derive(Debug, Clone)]
 struct ProxyPool {
-    clients: Vec<reqwest::Client>,
+    clients: Vec<(reqwest::Client, String)>, // (client, label)
     counter: Arc<AtomicUsize>,
 }
 
@@ -80,12 +80,15 @@ impl ProxyPool {
     fn new(proxies: &[String]) -> Self {
         let mut clients = Vec::with_capacity(proxies.len() + 1);
 
-        clients.push(Self::build_http_client(None));
+        clients.push((Self::build_http_client(None), "direct".to_string()));
 
         for proxy_url in proxies {
             match reqwest::Proxy::all(proxy_url) {
                 Ok(proxy) => {
-                    clients.push(Self::build_http_client(Some(proxy)));
+                    clients.push((
+                        Self::build_http_client(Some(proxy)),
+                        proxy_url.clone(),
+                    ));
                     println!("  ✓ Proxy added: {proxy_url}");
                 }
                 Err(e) => {
@@ -118,24 +121,29 @@ impl ProxyPool {
     }
 
     fn direct(&self) -> &reqwest::Client {
-        &self.clients[0]
+        &self.clients[0].0
     }
 
     fn next(&self) -> &reqwest::Client {
         let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.clients.len();
-        &self.clients[idx]
+        &self.clients[idx].0
+    }
+
+    fn next_with_index(&self) -> (usize, &reqwest::Client) {
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.clients.len();
+        (idx, &self.clients[idx].0)
+    }
+
+    fn get_by_index(&self, idx: usize) -> &reqwest::Client {
+        &self.clients[idx % self.clients.len()].0
+    }
+
+    fn label(&self, idx: usize) -> &str {
+        &self.clients[idx % self.clients.len()].1
     }
 
     fn advance(&self) {
         self.counter.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn next_proxy_or_direct(&self) -> &reqwest::Client {
-        if self.clients.len() <= 1 {
-            return self.direct();
-        }
-        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % (self.clients.len() - 1) + 1;
-        &self.clients[idx]
     }
 
     fn len(&self) -> usize {
@@ -304,7 +312,8 @@ impl Client {
                     let body_text = String::from_utf8_lossy(&bytes).to_string();
                     return Err(Box::new(RateLimitedError {
                         message: format!("HTTP {status}: {body_text}"),
-                    }) as Box<dyn std::error::Error + Send + Sync>);
+                    })
+                        as Box<dyn std::error::Error + Send + Sync>);
                 }
 
                 if !status.is_success() {
@@ -339,8 +348,12 @@ impl Client {
 
         let mut last_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
 
-        for attempt in 1..=3u64 {
-            let http = self.proxy_pool.direct().clone();
+        let max_attempts = 3u64.max(self.proxy_pool.len() as u64);
+
+        for attempt in 1..=max_attempts {
+            let (proxy_idx, http) = self.proxy_pool.next_with_index();
+            let http = http.clone();
+            let proxy_label = self.proxy_pool.label(proxy_idx).to_string();
 
             let resp = match http
                 .post(&url)
@@ -357,9 +370,11 @@ impl Client {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("[get_asset_location] attempt {attempt}/3 place {place_id}: {e}");
+                    eprintln!(
+                        "[get_asset_location] attempt {attempt}/{max_attempts} place {place_id} via [{proxy_label}]: {e}"
+                    );
                     last_err = Some(e.into());
-                    if attempt < 3 {
+                    if attempt < max_attempts {
                         sleep(Duration::from_millis(500 * attempt)).await;
                     }
                     continue;
@@ -370,9 +385,11 @@ impl Client {
             let bytes = match resp.bytes().await {
                 Ok(b) => b,
                 Err(e) => {
-                    eprintln!("[get_asset_location] body read attempt {attempt}/3 place {place_id}: {e}");
+                    eprintln!(
+                        "[get_asset_location] body read attempt {attempt}/{max_attempts} place {place_id} via [{proxy_label}]: {e}"
+                    );
                     last_err = Some(e.into());
-                    if attempt < 3 {
+                    if attempt < max_attempts {
                         sleep(Duration::from_millis(500 * attempt)).await;
                     }
                     continue;
@@ -382,23 +399,29 @@ impl Client {
             if !status.is_success() {
                 let body_text = String::from_utf8_lossy(&bytes);
                 let msg = format!("Asset delivery failed ({status}): {body_text}");
+
                 if status.as_u16() == 429 {
-                    eprintln!("[get_asset_location] attempt {attempt}/3 place {place_id}: {msg} (switching proxy)");
-                    self.proxy_pool.advance();
+                    eprintln!(
+                        "[get_asset_location] attempt {attempt}/{max_attempts} place {place_id} via [{proxy_label}]: 429 rate limited, switching proxy"
+                    );
                     last_err = Some(msg.into());
-                    if attempt < 3 {
+                    if attempt < max_attempts {
                         sleep(Duration::from_millis(1000 * attempt)).await;
                     }
                     continue;
                 }
+
                 if status.is_server_error() {
-                    eprintln!("[get_asset_location] attempt {attempt}/3 place {place_id}: {msg}");
+                    eprintln!(
+                        "[get_asset_location] attempt {attempt}/{max_attempts} place {place_id} via [{proxy_label}]: {msg}"
+                    );
                     last_err = Some(msg.into());
-                    if attempt < 3 {
+                    if attempt < max_attempts {
                         sleep(Duration::from_millis(500 * attempt)).await;
                     }
                     continue;
                 }
+
                 return Err(msg.into());
             }
 
@@ -406,6 +429,10 @@ impl Client {
             let item = items.into_iter().next().ok_or("Empty response")?;
             let locations = item.locations.ok_or("No locations in response")?;
             let loc = locations.into_iter().next().ok_or("Locations array empty")?;
+
+            println!(
+                "[get_asset_location] ✓ place {place_id} resolved via [{proxy_label}]"
+            );
             return Ok(loc.location);
         }
 
@@ -440,7 +467,8 @@ impl Client {
                     let body_text = String::from_utf8_lossy(&bytes).to_string();
                     return Err(Box::new(RateLimitedError {
                         message: format!("HTTP {status}: {body_text}"),
-                    }) as Box<dyn std::error::Error + Send + Sync>);
+                    })
+                        as Box<dyn std::error::Error + Send + Sync>);
                 }
 
                 if !status.is_success() {
@@ -529,7 +557,8 @@ impl Client {
                         let body_text = String::from_utf8_lossy(&bytes).to_string();
                         return Err(Box::new(RateLimitedError {
                             message: format!("HTTP {status}: {body_text}"),
-                        }) as Box<dyn std::error::Error + Send + Sync>);
+                        })
+                            as Box<dyn std::error::Error + Send + Sync>);
                     }
 
                     if !status.is_success() {
