@@ -2,7 +2,7 @@ How to use:
 
 Build & Run:
 ```bash
-export ROBLOX_AUTHORIZATION="your_roblox_cookie"
+export ROBLOX_AUTHORIZATION="your_roblox_cookie" # or make cookies.txt with roblox cookies
 export API_TOKEN="your-secret-api-token"
 cargo run
 ```
