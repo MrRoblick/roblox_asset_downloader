@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 tokio = {version = "1.50.0", features = ["full"]}
 axum = {version = "0.8.8"}
-reqwest = { version = "0.13.2", features = ["json", "cookies"] }
+reqwest = { version = "0.13.2", features = ["json", "cookies", "gzip", "deflate", "brotli"] }
 serde = {version = "1.0.228", features = ["derive"]}
 async-stream = {version="0.3.6"}
 futures-core = {version = "0.3.32"}

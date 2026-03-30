@@ -25,20 +25,20 @@ pub struct AssetDetailsResponse{
 }
 
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupGamesResponse {
     pub next_page_cursor: Option<String>,
     pub data: Vec<GameDetail>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RootPlace {
     pub id: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct GameDetail {
     pub id: u64,
@@ -48,14 +48,14 @@ pub struct GameDetail {
 
 
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetBatchRequest {
     pub asset_id: u64,
     pub request_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetBatchResponseItem {
     pub locations: Option<Vec<AssetLocation>>,
@@ -65,7 +65,7 @@ pub struct AssetBatchResponseItem {
     pub is_recordable: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetLocation {
     pub asset_format: String,
@@ -73,9 +73,28 @@ pub struct AssetLocation {
     pub asset_metadatas: Option<Vec<AssetMetadata>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetMetadata {
     pub metadata_type: u32,
     pub value: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserGroupListResponse {
+    pub data: Vec<UserGroupRole>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserGroupRole {
+    pub group: GroupInfo,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupInfo {
+    pub id: u64,
+    pub name: String,
 }
