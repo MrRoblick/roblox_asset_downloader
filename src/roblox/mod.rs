@@ -104,7 +104,6 @@ impl Client{
             self.endpoints.asset_delivery
         );
 
-        // Отладка: выводим что отправляем
         let body_json = serde_json::to_string(&body)?;
         eprintln!("=== REQUEST ===");
         eprintln!("URL: {}", url);
