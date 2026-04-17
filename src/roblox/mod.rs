@@ -404,7 +404,7 @@ impl Client {
             request_id: "0".into(),
         }];
         let url = format!(
-            "https://{}/v2/assets/batch",
+            "https://{}/v1/assets/batch",
             self.endpoints.asset_delivery
         );
 
@@ -517,21 +517,17 @@ impl Client {
                 return Err(msg.into());
             }
 
-            let items: Vec<AssetBatchResponseItem> =
-                serde_json::from_slice(&bytes)?;
-            let item =
-                items.into_iter().next().ok_or("Empty response")?;
-            let locations =
-                item.locations.ok_or("No locations in response")?;
-            let loc = locations
-                .into_iter()
-                .next()
-                .ok_or("Locations array empty")?;
+            let items: Vec<AssetBatchResponseItem> = serde_json::from_slice(&bytes)?;
+            let item = items.into_iter().next().ok_or("Empty response array")?;
+
+            let download_url = item.location.ok_or_else(|| {
+                format!("No location provided in response (Archived: {})", item.is_archived)
+            })?;
 
             println!(
                 "[get_asset_location] ✓ place {place_id} resolved via [{proxy_label}] cookie#{cookie_idx}"
             );
-            return Ok(loc.location);
+            return Ok(download_url);
         }
 
         Err(last_err

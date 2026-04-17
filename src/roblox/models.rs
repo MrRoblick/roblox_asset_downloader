@@ -55,13 +55,13 @@ pub struct AssetBatchRequest {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetBatchResponseItem {
-    pub locations: Option<Vec<AssetLocation>>,
+    pub location: Option<String>,
     pub request_id: String,
     pub is_archived: bool,
     pub asset_type_id: u32,
     pub is_recordable: bool,
+    pub asset_metadatas: Option<Vec<AssetMetadata>>,
 }
-
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetLocation {
